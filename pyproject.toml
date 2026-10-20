@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "arcline-vectorize"
+version = "0.1.0"
+description = "Rust port of arc_line_vectorization_suede (image -> robot arc/line commands)"
+requires-python = ">=3.9"
+
+[tool.maturin]
+features = ["python"]
+module-name = "arcline_vectorize"

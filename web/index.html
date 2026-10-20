@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arc/Line Vectorizer (wasm)</title>
+<style>
+  :root { --fg: #1c1c1c; --bg: #fafafa; --muted: #666; --line: #ddd; --accent: #0b5fff; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #151515; --muted: #aaa; --line: #333; } }
+  body { margin: 0; padding: 16px; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--bg); min-width: 280px; flex: 1 1 420px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  canvas, svg, img { max-width: 100%; height: auto; border: 1px solid var(--line); background: #fff; }
+  pre { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; max-height: 320px; overflow: auto; margin: 0; }
+  .stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0; }
+  .stats b { font-variant-numeric: tabular-nums; }
+  button, input { font: inherit; }
+  button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--accent); color: #fff; cursor: pointer; }
+  button[disabled] { opacity: .5; cursor: default; }
+  label { margin-right: 12px; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Arc/Line Vectorizer — Rust → WebAssembly</h1>
+<p class="muted">Pick a black-on-white drawing. Everything runs in your browser: the image is decoded with a canvas, the RGBA pixels are handed to the wasm module, and the robot commands + SVG come back.</p>
+<p>
+  <input type="file" id="file" accept="image/*">
+  <label><input type="checkbox" id="timing" checked> show timing</label>
+  <button id="rerun" disabled>Run again</button>
+  <button id="download" disabled>Download JSON</button>
+</p>
+<div class="row">
+  <div class="card"><h2>Input</h2><canvas id="canvas"></canvas></div>
+  <div class="card"><h2>Result (low geometry = blue, high geometry = red)</h2><div id="svg"></div></div>
+</div>
+<div class="row" style="margin-top:16px">
+  <div class="card">
+    <h2>Stats</h2>
+    <div class="stats" id="stats"></div>
+  </div>
+  <div class="card"><h2>Low-geometry commands</h2><pre id="low"></pre></div>
+  <div class="card"><h2>High-geometry commands</h2><pre id="high"></pre></div>
+</div>
+
+<script type="module">
+import init, { vectorize_json } from '../pkg-web/arcline_vectorize.js';
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+let ready = init();
+let lastJson = null;
+
+function fmtCmd(c) {
+  if (c.kind === 'line') return `line  ${c.distance.toFixed(3).padStart(10)}  ${c.penDown ? 'pen down' : 'pen up'}`;
+  if (c.kind === 'spin') return `spin  ${c.degrees.toFixed(3).padStart(10)}°`;
+  return `arc   r=${c.radius.toFixed(3)}  ${c.degrees.toFixed(3)}°`;
+}
+
+async function run() {
+  await ready;
+  const { width, height } = canvas;
+  if (!width || !height) return;
+  const img = ctx.getImageData(0, 0, width, height);
+  const t0 = performance.now();
+  // treat_alpha=true composites transparent pixels over white; opaque images are unaffected.
+  const json = vectorize_json(img.data, width, height, true);
+  const ms = performance.now() - t0;
+  const r = JSON.parse(json);
+  lastJson = json;
+  $('svg').innerHTML = r.svg;
+  const stats = $('stats');
+  stats.innerHTML = '';
+  const add = (k, v) => { stats.insertAdjacentHTML('beforeend', `<span>${k}</span><b>${v}</b>`); };
+  add('image', `${width} × ${height}`);
+  if ($('timing').checked) add('vectorize time', `${ms.toFixed(1)} ms`);
+  add('low-geometry commands', r.low_geometry.length);
+  add('high-geometry commands', r.high_geometry.length);
+  $('low').textContent = r.low_geometry.map(fmtCmd).join('\n');
+  $('high').textContent = r.high_geometry.map(fmtCmd).join('\n');
+  $('rerun').disabled = false;
+  $('download').disabled = false;
+}
+
+$('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const bmp = await createImageBitmap(f);
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, bmp.width, bmp.height);
+  ctx.drawImage(bmp, 0, 0);
+  await run();
+});
+$('rerun').addEventListener('click', run);
+$('download').addEventListener('click', () => {
+  const blob = new Blob([lastJson], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'vectorized.json';
+  a.click();
+});
+</script>
+</body>
+</html>
