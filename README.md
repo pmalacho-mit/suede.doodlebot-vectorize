@@ -12,114 +12,53 @@ compiled to WebAssembly.
 Output of the wasm module is bit-identical to the native binary on all 22
 images. Parity against the Python reference is described in detail below.
 
+
+This repository is a [suede](https://github.com/pmalacho-mit/suede) dependency. Everything a consumer
+needs to build the module lives in [`release/`](release/) (which is published to the `release` branch);
+see [release/README.md](release/README.md) for how to use it from JavaScript, Python and Rust.
+Everything outside `release/` is development, verification and CI.
+
 ## Layout
 
 ```
-Cargo.toml            crate `arcline_vectorize` (rlib + cdylib) + `vectorize` CLI (feature `cli`) + Python ext (feature `python`)
-pyproject.toml        maturin config for the Python wheel
-python/vectorize_rust.py  drop-in `run_vectorization` for the FastAPI app
-src/                  the port (module map below)
-build_wasm.sh         builds the wasm module and generates JS glue into pkg-web/ and pkg-node/
-pkg-web/              prebuilt ES-module build for browsers   (arcline_vectorize.js + _bg.wasm, ~700 KB)
-pkg-node/             prebuilt CommonJS build for Node
-web/index.html        browser demo (file picker → canvas → wasm → commands + SVG)
-js/bench_node.js      Node benchmark / parity check against native JSON outputs
-tests/reference/      Python reference outputs, Rust outputs and the parity report for the 22 images
+release/                  shipped source (the `release` branch)
+  Cargo.toml / Cargo.lock crate `arcline_vectorize` (rlib + cdylib) + `vectorize` CLI (feature `cli`) + Python ext (feature `python`)
+  src/                    the port (module map below)
+  pyproject.toml          maturin config for the Python wheel (version comes from Cargo.toml)
+  python/vectorize_rust.py  drop-in `run_vectorization` for the FastAPI app
+  build_wasm.sh           builds the wasm module and generates JS glue into release/pkg-web/ and release/pkg-node/ (gitignored)
+  README.md               consumer documentation
+web/index.html            browser demo (file picker → canvas → wasm → commands + SVG)
+.devcontainer/            development container
+.github/workflows/        CI: build-release.yml (below) + suede's publish workflow
+js/bench_node.js          Node benchmark / parity check against native JSON outputs
+tests/reference/          Python reference outputs, Rust outputs and the parity report for the 22 images
 ```
 
 ## Development container
 
 `.devcontainer/` sets up Ubuntu 24.04 with Rust (stable + `wasm32-unknown-unknown`), Python 3.12, Node 22,
-`wasm-bindgen-cli` pinned to the version in `Cargo.lock`, `maturin` and `binaryen`. The post-create step also
-runs a native build and `./build_wasm.sh`, so the container opens ready to use.
-
-## Using it from JavaScript
-
-The module takes **raw RGBA8 pixels** (exactly what `CanvasRenderingContext2D.getImageData()` gives you)
-and returns the same JSON structure the Python endpoint returns.
-
-```js
-import init, { vectorize_json, vectorize } from './pkg-web/arcline_vectorize.js';
-await init();                                   // loads arcline_vectorize_bg.wasm (same directory)
-
-const ctx = canvas.getContext('2d', { willReadFrequently: true });
-const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-// treat_alpha=true composites transparent pixels over white (what skimage's rgba2rgb does);
-// for opaque images it makes no difference, so `true` is the safe default from a canvas.
-const result = vectorize(data, width, height, true);   // JS object
-// or: JSON.parse(vectorize_json(data, width, height, true))
-
-result.low_geometry   // [{kind:'spin', degrees}, {kind:'line', distance, penDown}, {kind:'arc', radius, degrees}, ...]
-result.high_geometry  // same shape
-result.svg            // side-by-side comparison SVG (commands_to_svg_compare)
-result.low_geometry_svg
-```
-
-`treat_alpha=false` reproduces the Python behaviour for RGB PNGs (alpha is ignored).
-Images of any size work; the test set is 1024×1024.
-
-The page must be served over HTTP (not `file://`) because the glue fetches the `.wasm`:
+`wasm-bindgen-cli` pinned to the version in `release/Cargo.lock`, `maturin` and Binaryen 123.
 
 ```
-python3 -m http.server 8000      # then open http://localhost:8000/web/
+cargo build --manifest-path release/Cargo.toml --release --features cli
+./release/build_wasm.sh
+maturin develop --release -m release/Cargo.toml
+python3 -m http.server 8000      # then open http://localhost:8000/web/ (the demo loads release/pkg-web/)
 ```
 
-The module is single-threaded and has no dependencies at runtime. For UI work, call it from a Web Worker
-so the ~100–400 ms of compute doesn't block rendering. The `.wasm` is ~700 KB uncompressed (≈250 KB gzipped);
-`wasm-opt -O3` is applied by `build_wasm.sh` when Binaryen is installed.
+## Releases
 
-## Using it from Python / FastAPI
+[`.github/workflows/build-release.yml`](.github/workflows/build-release.yml) builds from `release/` and attaches
+to a GitHub release: the Node and web wasm packages (`npm install <url>`), abi3 wheels for Linux x86_64/aarch64,
+macOS universal2 and Windows x64, and an sdist. Each build is smoke-tested before publishing.
 
-The crate also builds as a CPython extension (PyO3, abi3 ≥ 3.9) with `maturin`:
+1. Bump `version` in `release/Cargo.toml` (the wheel takes its version from there).
+2. Push a tag `v<version>` (the workflow refuses a tag that doesn't match), or run the workflow by hand
+   from the Actions tab, which tags the current commit as `v<version>`.
 
-```
-pip install maturin
-maturin build --release            # -> target/wheels/arcline_vectorize-*.whl, or `maturin develop --release`
-pip install target/wheels/arcline_vectorize-*.whl
-```
-
-```python
-import arcline_vectorize
-result = arcline_vectorize.vectorize(rgba_bytes, width, height, has_alpha)   # same dict as the HTTP endpoint
-```
-
-`python/vectorize_rust.py` is a drop-in `run_vectorization(image_array)` with the same contract as the one in
-`vectorize.py`, so the FastAPI endpoint stays as it is:
-
-```python
-from .vectorize_rust import run_vectorization   # instead of the Python pipeline
-...
-return await asyncio.to_thread(run_vectorization, image_array)
-```
-
-The extension releases the GIL while it runs, so `asyncio.to_thread` (or a thread pool) gives true
-parallelism across concurrent requests. Output is identical to the CLI and wasm builds (verified on the 22 images).
-
-## Using it from Rust / the command line
-
-```
-cargo build --release --features cli
-./target/release/vectorize input.png out.json            # same JSON as the wasm API
-./target/release/vectorize input.png out.json --time     # prints the total time
-VEC_TIMING=1 ./target/release/vectorize input.png out.json   # per-stage timings on stderr
-./target/release/vectorize input.png out.json --stages dir/  # dumps intermediate stages (binary, skeleton, polylines, primitives…)
-```
-
-Library API: `arcline_vectorize::vectorize_rgba(&rgba, width, height, has_alpha) -> VectorizationResult`
-(serde-serialisable), or `run_pipeline(...)` which also returns the intermediate `StageOutputs`.
-
-## Building the wasm module yourself
-
-```
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.129    # must match wasm-bindgen in Cargo.lock
-./build_wasm.sh
-```
-
-`build_wasm.sh` enables the `simd128` target feature (supported by every browser since 2021 and by Node ≥16).
-SIMD only changes speed, never results: all floating-point math in the port is IEEE-exact or explicitly
-emulated, so native, wasm and wasm+SIMD builds produce identical bits.
+Pull requests touching `release/` run the same builds without publishing. Built artifacts never go into
+`release/`; it holds source only.
 
 ## Parity with the Python reference
 
@@ -203,8 +142,8 @@ raises `IndexError` (e.g. `noise.png`); the port skips that segment and continue
 # Python reference (needs the original package + numpy/scipy/scikit-image/networkx/Pillow)
 python tests/reference/gen_ref.py <path-to-code> tests/reference/python 'images/*.png'
 # Rust
-cargo build --release --features cli
-for f in images/*.png; do ./target/release/vectorize "$f" tests/reference/rust/$(basename "$f" .png).json; done
+cargo build --manifest-path release/Cargo.toml --release --features cli
+for f in images/*.png; do ./release/target/release/vectorize "$f" tests/reference/rust/$(basename "$f" .png).json; done
 # wasm vs native
 node js/bench_node.js <dir with .rgba dumps + meta.json> tests/reference/rust
 ```

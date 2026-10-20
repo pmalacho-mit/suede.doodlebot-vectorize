@@ -1,0 +1,227 @@
+name: build-release
+#
+# Lives on `main` only (not under release/, so it never ships to consumers).
+# Builds installable artifacts from the source in ./release and attaches them
+# to a GitHub Release, so a consumer that only wants the compiled module can
+# install it by URL instead of building it:
+#
+#   arcline-vectorize-node-<ver>.tgz   wasm + CommonJS glue   (npm install <url>)
+#   arcline-vectorize-web-<ver>.tgz    wasm + ES-module glue  (npm install <url>)
+#   arcline_vectorize-<ver>-*.whl      abi3 wheels, Python >= 3.9 (pip install <url>)
+#   arcline_vectorize-<ver>.tar.gz     sdist (builds from source, needs Rust)
+#
+# Publishing: push a tag `v<version>` matching release/Cargo.toml, or run the
+# workflow by hand (it tags the current commit as `v<version>`). Pull requests
+# touching release/ build everything but publish nothing.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "release/**"
+      - ".github/workflows/build-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Ubuntu's apt binaryen (v108) corrupts wasm-bindgen's externref table.
+  BINARYEN_VERSION: version_123
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      wasm_bindgen: ${{ steps.v.outputs.wasm_bindgen }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' release/Cargo.toml | head -1)
+          wbg=$(grep -A1 '^name = "wasm-bindgen"$' release/Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "wasm_bindgen=$wbg" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match release/Cargo.toml version $version"
+            exit 1
+          fi
+
+  wasm:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # wasm-bindgen-cli must match the wasm-bindgen crate version in Cargo.lock.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ needs.version.outputs.wasm_bindgen }}
+      - name: Install binaryen
+        run: |
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_VERSION/binaryen-$BINARYEN_VERSION-x86_64-linux.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-$BINARYEN_VERSION/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: bash release/build_wasm.sh
+
+      # wasm-bindgen (unlike wasm-pack) writes no package.json, so add one per target.
+      - name: Package
+        run: |
+          mkdir -p dist
+          for target in node web; do
+            dir="release/pkg-$target"
+            TARGET=$target node -e '
+              const fs = require("fs");
+              const t = process.env.TARGET;
+              const pkg = {
+                name: `arcline-vectorize-${t}`,
+                version: process.env.VERSION,
+                description: `arcline_vectorize compiled to WebAssembly (${t === "node" ? "Node.js, CommonJS" : "browser, ES module"})`,
+                license: "MIT",
+                repository: { type: "git", url: `https://github.com/${process.env.GITHUB_REPOSITORY}` },
+                main: "arcline_vectorize.js",
+                types: "arcline_vectorize.d.ts",
+                files: ["*.js", "*.d.ts", "*.wasm", "snippets/"],
+              };
+              if (t === "web") Object.assign(pkg, { type: "module", module: "arcline_vectorize.js", sideEffects: ["./snippets/*"] });
+              fs.writeFileSync(process.argv[1], JSON.stringify(pkg, null, 2) + "\n");
+            ' "$dir/package.json"
+            (cd "$dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist")
+          done
+          ls -la dist
+
+      - name: Smoke-test the Node package
+        run: |
+          cd "$RUNNER_TEMP" && npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/dist/arcline-vectorize-node-$VERSION.tgz"
+          node -e '
+            const { vectorize } = require("arcline-vectorize-node");
+            const w = 64, h = 64, d = new Uint8Array(w * h * 4).fill(255);
+            for (let y = 20; y < 44; y++) for (let x = 30; x < 34; x++) d.fill(0, (y * w + x) * 4, (y * w + x) * 4 + 3);
+            const r = vectorize(d, w, h, true);
+            if (!Array.isArray(r.low_geometry) || typeof r.svg !== "string") throw new Error("unexpected result");
+            console.log("ok:", r.low_geometry.length, "low-geometry commands");
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wasm
+          path: dist/*
+
+  wheels:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64 }
+          - { os: ubuntu-latest, target: aarch64 }
+          - { os: macos-latest, target: universal2-apple-darwin }
+          - { os: windows-latest, target: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # abi3-py39: one wheel per platform covers every CPython >= 3.9.
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: release
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+      - name: Smoke-test the wheel
+        # Cross-compiled aarch64 wheels cannot run on the x86_64 runner.
+        if: matrix.target != 'aarch64'
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links release/dist arcline-vectorize
+          python -c "
+          import arcline_vectorize
+          w = h = 64
+          px = bytearray(b'\xff' * (w * h * 4))
+          for y in range(20, 44):
+              for x in range(30, 34):
+                  i = (y * w + x) * 4; px[i:i + 3] = b'\0\0\0'
+          r = arcline_vectorize.vectorize(bytes(px), w, h, True)
+          assert isinstance(r['svg'], str), r
+          print('ok:', len(r['low_geometry']), 'low-geometry commands')
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: release/dist/*
+
+  sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: release
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: release/dist/*
+
+  publish:
+    needs: [version, wasm, wheels, sdist]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.version.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - name: Write release notes
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          cat > notes.md <<EOF
+          Built from \`release/\` at $GITHUB_SHA.
+
+          **Node.js** (CommonJS)
+          \`\`\`
+          npm install $base/arcline-vectorize-node-$VERSION.tgz
+          \`\`\`
+
+          **Browser / bundler** (ES module, call the default-exported \`init()\` first)
+          \`\`\`
+          npm install $base/arcline-vectorize-web-$VERSION.tgz
+          \`\`\`
+
+          **Python** >= 3.9 (pip picks the right wheel for your platform)
+          \`\`\`
+          pip install arcline-vectorize --find-links https://github.com/$GITHUB_REPOSITORY/releases/expanded_assets/$TAG
+          \`\`\`
+          or a specific wheel: \`pip install "arcline-vectorize @ $base/<wheel file name>"\`
+          EOF
+      - name: Create or update the release
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md \
+              --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+          fi
