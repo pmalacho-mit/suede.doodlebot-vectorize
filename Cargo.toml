@@ -1,0 +1,40 @@
+[package]
+name = "arcline_vectorize"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the arc/line vectorization pipeline (image -> wheeled-robot drawing commands)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "vectorize"
+path = "src/bin/vectorize.rs"
+required-features = ["cli"]
+
+[dependencies]
+indexmap = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libm = "0.2"
+wasm-bindgen = { version = "0.2", optional = true }
+png = { version = "0.17", optional = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"], optional = true }
+
+[features]
+default = []
+wasm = ["wasm-bindgen"]
+python = ["pyo3"]
+cli = ["png"]
+naive_fma_test = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.dev]
+opt-level = 1
