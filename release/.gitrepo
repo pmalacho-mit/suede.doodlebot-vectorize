@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/pmalacho-mit/suede.doodlebot-vectorize
+	branch = release
+	commit = e4f6b81c69c3e07ee673130731d92050ce2d717e
+	parent = 5b6a6f3eede101db84542f3224b1dda36d6cc497
+	method = merge
+	cmdver = 0.4.9
