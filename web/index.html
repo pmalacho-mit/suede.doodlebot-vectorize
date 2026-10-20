@@ -32,6 +32,7 @@
   <button id="rerun" disabled>Run again</button>
   <button id="download" disabled>Download JSON</button>
 </p>
+<p class="muted" id="build">loading wasm…</p>
 <div class="row">
   <div class="card"><h2>Input</h2><canvas id="canvas"></canvas></div>
   <div class="card"><h2>Result (low geometry = blue, high geometry = red)</h2><div id="svg"></div></div>
@@ -46,12 +47,33 @@
 </div>
 
 <script type="module">
-import init, { vectorize_json } from '../release/pkg-web/arcline_vectorize.js';
+// Where the wasm build comes from. GitHub release assets can't be fetched by a browser (no CORS
+// headers), so build-release.yml also deploys the latest release's pkg-web/ to GitHub Pages.
+//   (default)            the latest release, from GitHub Pages
+//   ?wasm=local          your own build in ../release/pkg-web/ (./release/build_wasm.sh)
+//   ?wasm=<base url>     any other directory containing arcline_vectorize.js
+const PAGES = 'https://pmalacho-mit.github.io/suede.doodlebot-vectorize/';
+const param = new URLSearchParams(location.search).get('wasm');
+const base = param === 'local' ? new URL('../release/pkg-web/', location.href).href
+  : param ? new URL(param.endsWith('/') ? param : param + '/', location.href).href
+  : PAGES + 'pkg-web/';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
-let ready = init();
+let vectorize_json;
+const ready = (async () => {
+  const mod = await import(base + 'arcline_vectorize.js');
+  await mod.default();                          // fetches arcline_vectorize_bg.wasm next to the module
+  vectorize_json = mod.vectorize_json;
+  // version.json is written by the Pages deploy; a local build has none.
+  const v = await fetch(base + 'version.json').then((r) => r.ok ? r.json() : null).catch(() => null);
+  $('build').textContent = `wasm: ${v ? `v${v.version} (${v.commit.slice(0, 7)})` : 'local build'} from ${base}`;
+})().catch((err) => {
+  $('build').textContent = `failed to load wasm from ${base}: ${err.message}`
+    + (param === 'local' ? ' (run ./release/build_wasm.sh first)' : '');
+  throw err;
+});
 let lastJson = null;
 
 function fmtCmd(c) {

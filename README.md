@@ -44,7 +44,7 @@ tests/reference/          Python reference outputs, Rust outputs and the parity 
 cargo build --manifest-path release/Cargo.toml --release --features cli
 ./release/build_wasm.sh
 maturin develop --release -m release/Cargo.toml
-python3 -m http.server 8000      # then open http://localhost:8000/web/ (the demo loads release/pkg-web/)
+python3 -m http.server 8000      # then open http://localhost:8000/web/?wasm=local
 ```
 
 ## Releases
@@ -52,6 +52,11 @@ python3 -m http.server 8000      # then open http://localhost:8000/web/ (the dem
 [`.github/workflows/build-release.yml`](.github/workflows/build-release.yml) builds from `release/` and attaches
 to a GitHub release: the Node and web wasm packages (`npm install <url>`), abi3 wheels for Linux x86_64/aarch64,
 macOS universal2 and Windows x64, and an sdist. Each build is smoke-tested before publishing.
+
+Browsers can't load release assets (GitHub serves them without CORS headers), so the workflow also deploys the
+web build plus the `web/` demo to GitHub Pages: https://pmalacho-mit.github.io/suede.doodlebot-vectorize/.
+`web/index.html` loads the wasm from there by default; `?wasm=local` uses your `release/pkg-web/` build instead,
+and `?wasm=<base url>` any other copy.
 
 1. Bump `version` in `release/Cargo.toml` (the wheel takes its version from there).
 2. Push a tag `v<version>` (the workflow refuses a tag that doesn't match), or run the workflow by hand

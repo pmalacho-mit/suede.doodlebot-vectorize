@@ -10,6 +10,9 @@ name: build-release
 #   arcline_vectorize-<ver>-*.whl      abi3 wheels, Python >= 3.9 (pip install <url>)
 #   arcline_vectorize-<ver>.tar.gz     sdist (builds from source, needs Rust)
 #
+# The web build and the web/ demo are also deployed to GitHub Pages, because a
+# browser cannot load release assets directly (they are served without CORS).
+#
 # Publishing: push a tag `v<version>` matching release/Cargo.toml, or run the
 # workflow by hand (it tags the current commit as `v<version>`). Pull requests
 # touching release/ build everything but publish nothing.
@@ -116,6 +119,19 @@ jobs:
         with:
           name: dist-wasm
           path: dist/*
+
+      # Browsers can't load release assets (no CORS headers), so the web build is
+      # also served from GitHub Pages, together with the web/ demo that loads it.
+      - name: Assemble Pages site
+        run: |
+          mkdir -p site/pkg-web
+          cp web/index.html site/
+          cp -r release/pkg-web/*.js release/pkg-web/*.d.ts release/pkg-web/*.wasm release/pkg-web/snippets site/pkg-web/
+          printf '{"version": "%s", "commit": "%s"}\n' "$VERSION" "$GITHUB_SHA" > site/pkg-web/version.json
+          touch site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
 
   wheels:
     needs: version
@@ -225,3 +241,18 @@ jobs:
             gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md \
               --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
+
+  # Serves the latest release's web build + demo at
+  # https://<owner>.github.io/<repo>/ (Settings -> Pages -> Source: GitHub Actions).
+  pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
