@@ -1,0 +1,48 @@
+name: subrepo-push-release
+#
+# Lives on `main`. Fires when a change under release/ lands. Everything it does
+# is in .suede/core/push-release.sh: refresh the dependency records, refuse to
+# publish a dishonest pointer (a diverged release dependency, or a declared
+# dependency that is not in place), then sync ./release out to the `release`
+# branch.
+#
+# This file only wires up credentials and the two third-party tools. Keeping
+# the logic in a script is what makes it testable without a runner.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "release/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: suede-push-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      # A third-party tool, not a suede script, so it is installed here rather
+      # than vendored.
+      - name: Install git-subrepo
+        run: |
+          git clone --quiet --branch 0.4.9 https://github.com/ingydotnet/git-subrepo "$HOME/.git-subrepo"
+          echo "$HOME/.git-subrepo/lib" >> "$GITHUB_PATH"
+
+      # --https: a runner has no SSH key, so the SSH attempt would only cost a
+      # timeout per dependency before the fallback.
+      - run: bash .suede/core/push-release.sh --https

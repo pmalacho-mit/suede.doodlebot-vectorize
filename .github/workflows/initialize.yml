@@ -1,0 +1,97 @@
+name: Initialize
+#
+# Lives on `main`. Run once, manually, right after creating a repo from the
+# dependency template. Everything it does to the repository is in one hosted
+# script, scripts/actions/init.sh: vendor the maintainer's core at .suede/core,
+# connect ./release to the repo's own `release` branch, vendor the consumer's
+# core at ./release/.suede/core, and publish.
+#
+# It never checks out `release`. That is the point: the consumer-facing core
+# lives inside the release folder, so it reaches the `release` branch through
+# `main` like all other release content, and updating it later is a
+# `git subrepo pull release/.suede/core` on `main`.
+#
+# The cores are subrepo-cloned at init time (rather than baked into the
+# template) so their .gitrepo links point at real commits. No devcontainer is
+# installed: a dependency's development environment is its own choice. The
+# hosted script is tested; README population and self-deletion stay here.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Set this to your canonical scripts host (see note in suede-downstream-to-main.yml).
+  SUEDE_SCRIPTS: https://raw.githubusercontent.com/pmalacho-mit/suede/refs/heads/main/scripts
+
+jobs:
+  install-release-subrepo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-subrepo
+        shell: bash
+        run: |
+          git clone https://github.com/ingydotnet/git-subrepo ~/.git-subrepo
+          echo "$HOME/.git-subrepo/lib" >> "$GITHUB_PATH"
+
+      - name: Check git-subrepo installation
+        shell: bash
+        run: git subrepo --version
+
+      - name: Configure git identity for commits
+        shell: bash
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+
+      - name: Initialize the repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout main
+          bash -c "$(curl -fsSL "$SUEDE_SCRIPTS/actions/init.sh")"
+
+      - name: Populate README with installation details
+        shell: bash
+        run: |
+          bash -c "$(curl -fsSL "$SUEDE_SCRIPTS/populate/readme-after-init.sh")"
+
+      - name: Commit and push updated README
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git status --porcelain README.md)" ]]; then
+            git add README.md
+            git commit -m "chore(suede-init): update README after initialization"
+            git push
+          else
+            echo "No changes to README.md to commit."
+          fi
+
+      - name: Delete initialize action (aka this file)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=".github/workflows/initialize.yml"
+
+          if [[ -f "$FILE" ]]; then
+            echo "Removing $FILE..."
+            git rm -f "$FILE"
+
+            # Commit and push if there are staged changes
+            if [[ -n "$(git status --porcelain)" ]]; then
+              git commit -m "chore(suede-init): remove initialization workflow"
+              git push
+            else
+              echo "No changes to commit after removing $FILE."
+            fi
+          else
+            echo "File $FILE not found; nothing to delete."
+          fi
