@@ -6,7 +6,7 @@
 [subrepo]
 	remote = https://github.com/pmalacho-mit/suede.doodlebot-vectorize
 	branch = release
-	commit = 356fd4d6822fa7dc03c3864cf973a3d851664045
-	parent = 0d84acb0cb59f07aeeb59ffb21f4b8c32ec4cf28
+	commit = ee6bb2eb21b06e23c703f0a4f2dd9d26205330b3
+	parent = 84f9ed82256b3cbf482503aba63b76a509a2366a
 	method = merge
 	cmdver = 0.4.9
